@@ -25,11 +25,11 @@ window.addEventListener('load', async () => {
     }
     account = accounts[0];
     web3.eth.defaultAccount = account;
-    var info = document.getElementById("amount-details");
-    console.log("Methods from contract::: ", contract.methods);
+    var masterchefAmount = document.getElementById("masterchef-amount");
+    var masterchefDebt = document.getElementById("masterchef-debt");
     contract.methods.userInfo(contractAddress, account).call().then(function(details) {
-      console.log("Amount: ", details);
-      info.innerHTML = "Amount: " + details;
+      masterchefAmount.innerHTML = details[0];
+      masterchefDebt.innerHTML = details[1];
     });
   });
 });
