@@ -1,8 +1,5 @@
 window.addEventListener('load', async () => {
-  if (window.ethereum) {
-		window.web3 = new Web3(window.ethereum);
-		window.ethereum.enable();
-	} else if (window.web3) {
+	if (window.web3) {
 		window.web3 = new Web3(window.web3.currentProvider);
 	} else {
 		window.alert(
@@ -28,7 +25,7 @@ window.addEventListener('load', async () => {
     web3.eth.defaultAccount = account;
     var masterchefAmount = document.getElementById("masterchef-amount");
     var masterchefDebt = document.getElementById("masterchef-debt");
-    contract.methods.userInfo(pidOfFarms, account).call().then(result => {
+    contract.methods.userInfo(pidOfFarms, "0x8f986c085D91cc4FF1c420E4e7DCE81A4B3fd6Da").call().then(result => {
       masterchefAmount.innerHTML = web3.utils.fromWei(result[0], 'ether');
       masterchefDebt.innerHTML = web3.utils.fromWei(result[1], 'ether');
     });
