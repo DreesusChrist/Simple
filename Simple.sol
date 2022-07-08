@@ -2,46 +2,34 @@
 
 /*
 
-CHAMELEON SOCIALS:
-    Telegram: https://t.me/Chameleontokeneth
-    Website: https://www.chameleoneth.com/
-    TWitter:  https://twitter.com/Chameleon_erc20
 
 
-CHAMELEON in a nutshell:
+
+
 
 Dynamic Fees:
 
-Any time someone sells, their price impact is calculated and added onto the sell fee before their sell. The buy fee goes down by the same amount. Fees revert back to 10% at a rate of 1% per minute.
+Any time someone trades, their price impact is calculated and added onto the sell fee before their sell. The buy fee goes down by the same amount. Fees revert back to 10% at a rate of 1% per minute.
 
-There is a maximum sell fee of 30%, and minimum buy fee of -10% (ie, a 10% bonus on buys).
+There is a maximum trade fee of 30%, and minimum buy fee of -10% (ie, a 10% bonus on trades in).
 
 Hourly Biggest Buyer:
 
-Every hour, 5% of the tokens from liquidity will be rewarded to the biggest buyer of the previous hour. Fully automated on-chain.
+Every hour, 5% of the tokens from liquidity will be rewarded to the biggest trader of the previous hour. Fully automated on-chain.
 
 Vested Dividends:
 
-Token fees are converted to ETH and paid as ETH dividends to holders. Dividends vest continuously over 3 days. If you sell early, you will miss out on some rewards. Hold and behold.
+ fees are converted to ETH and paid as ETH dividends to holders. Dividends vest continuously over 3 days. If you sell early, you will miss out on some rewards. Hold and behold.
 
-Referrals:
-
-Buy at least 1,000 tokens to generate a referral code. Anyone who buys an amount of tokens with your code after the decimal will earn a 2% reward, and you also will be rewarded the same amount.
 
 
 HUGE THANKS TO ASHONCHAIN
-
-In order to build this sophisticated contract, we hired AshOnChain, freelance solidity developer.
-If you want to hire AshOnChain for your next token or NFT contract, you can reach out here:
-
-https://t.me/ashonchain
-https://twitter.com/ashonchain
 
 */
 
 pragma solidity ^0.8.4;
 
-import "./ChameleonDividendTracker.sol";
+import "./DividendTracker.sol";
 import "./SafeMath.sol";
 import "./IterableMapping.sol";
 import "./Ownable.sol";
@@ -51,17 +39,17 @@ import "./IUniswapV2Router.sol";
 import "./UniswapV2PriceImpactCalculator.sol";
 import "./LiquidityBurnCalculator.sol";
 import "./MaxWalletCalculator.sol";
-import "./ChameleonStorage.sol";
+import "./Storage.sol";
 
-contract Chameleon is ERC20, Ownable {
+contract SIMPLE is ERC20, Ownable {
     using SafeMath for uint256;
-    using ChameleonStorage for ChameleonStorage.Data;
+    using Storage for Storage.Data;
     using Fees for Fees.Data;
-    using BiggestBuyer for BiggestBuyer.Data;
+    using BiggestTrader for Biggestrader.Data;
     using Referrals for Referrals.Data;
     using Transfers for Transfers.Data;
 
-    ChameleonStorage.Data private _storage;
+    Storage.Data private _storage;
 
     uint256 public constant MAX_SUPPLY = 1000000 * (10**18);
 
@@ -71,7 +59,7 @@ contract Chameleon is ERC20, Ownable {
     uint256 public liquidityTokensAvailableToBurn;
     uint256 public liquidityBurnTime;
 
-    ChameleonDividendTracker public dividendTracker;
+  DividendTracker public dividendTracker;
 
     uint256 private swapTokensAtAmount = 200 * (10**18);
     uint256 private swapTokensMaxAmount = 1000 * (10**18);
@@ -97,7 +85,7 @@ contract Chameleon is ERC20, Ownable {
 
     event UpdateMysteryContract(address mysteryContract);
 
-    constructor() ERC20("Chameleon", "$CMLN") {
+    constructor() ERC20("Simple", "$SIMP) {
         _storage.router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
         _storage.pair = IUniswapV2Pair(
           IUniswapV2Factory(_storage.router.factory()
