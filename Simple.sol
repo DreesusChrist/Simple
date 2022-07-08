@@ -1,672 +1,445 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.6.2;
+/*
 
-import "./DividendPayingToken.sol";
+CHAMELEON SOCIALS:
+    Telegram: https://t.me/Chameleontokeneth
+    Website: https://www.chameleoneth.com/
+    TWitter:  https://twitter.com/Chameleon_erc20
+
+
+CHAMELEON in a nutshell:
+
+Dynamic Fees:
+
+Any time someone sells, their price impact is calculated and added onto the sell fee before their sell. The buy fee goes down by the same amount. Fees revert back to 10% at a rate of 1% per minute.
+
+There is a maximum sell fee of 30%, and minimum buy fee of -10% (ie, a 10% bonus on buys).
+
+Hourly Biggest Buyer:
+
+Every hour, 5% of the tokens from liquidity will be rewarded to the biggest buyer of the previous hour. Fully automated on-chain.
+
+Vested Dividends:
+
+Token fees are converted to ETH and paid as ETH dividends to holders. Dividends vest continuously over 3 days. If you sell early, you will miss out on some rewards. Hold and behold.
+
+Referrals:
+
+Buy at least 1,000 tokens to generate a referral code. Anyone who buys an amount of tokens with your code after the decimal will earn a 2% reward, and you also will be rewarded the same amount.
+
+
+HUGE THANKS TO ASHONCHAIN
+
+In order to build this sophisticated contract, we hired AshOnChain, freelance solidity developer.
+If you want to hire AshOnChain for your next token or NFT contract, you can reach out here:
+
+https://t.me/ashonchain
+https://twitter.com/ashonchain
+
+*/
+
+pragma solidity ^0.8.4;
+
+import "./ChameleonDividendTracker.sol";
 import "./SafeMath.sol";
 import "./IterableMapping.sol";
 import "./Ownable.sol";
 import "./IUniswapV2Pair.sol";
 import "./IUniswapV2Factory.sol";
 import "./IUniswapV2Router.sol";
+import "./UniswapV2PriceImpactCalculator.sol";
+import "./LiquidityBurnCalculator.sol";
+import "./MaxWalletCalculator.sol";
+import "./ChameleonStorage.sol";
 
-contract SCAM is ERC20, Ownable {
+contract Chameleon is ERC20, Ownable {
     using SafeMath for uint256;
+    using ChameleonStorage for ChameleonStorage.Data;
+    using Fees for Fees.Data;
+    using BiggestBuyer for BiggestBuyer.Data;
+    using Referrals for Referrals.Data;
+    using Transfers for Transfers.Data;
 
-    IUniswapV2Router02 public uniswapV2Router;
-    address public immutable uniswapV2Pair;
+    ChameleonStorage.Data private _storage;
 
-    address public immutable bounceFixedSaleWallet;
+    uint256 public constant MAX_SUPPLY = 1000000 * (10**18);
+
+    uint256 private hatchTime;
 
     bool private swapping;
+    uint256 public liquidityTokensAvailableToBurn;
+    uint256 public liquidityBurnTime;
 
-    TIKIDividendTracker public dividendTracker;
+    ChameleonDividendTracker public dividendTracker;
 
-    address public liquidityWallet;
+    uint256 private swapTokensAtAmount = 200 * (10**18);
+    uint256 private swapTokensMaxAmount = 1000 * (10**18);
 
-    uint256 public maxSellTransactionAmount = 1000000 * (10**18);
-    uint256 public swapTokensAtAmount = 200000 * (10**18);
+    // exlcude from fees and max transaction amount
+    mapping (address => bool) public isExcludedFromFees;
 
-    uint256 public immutable RUGRewardsFee;
-    uint256 public immutable liquidityFee;
-    uint256 public immutable totalFees;
-
-    // sells have fees of 12 and 6 (10 * 1.2 and 5 * 1.2)
-    uint256 public immutable sellFeeIncreaseFactor = 120; 
-
-    // use by default 300,000 gas to process auto-claiming dividends
-    uint256 public gasForProcessing = 300000;
-
-    event UpdateDividendTracker(address indexed newAddress, address indexed oldAddress);
-
-    event UpdateUniswapV2Router(address indexed newAddress, address indexed oldAddress);
+    event UpdateDividendTracker(address indexed newAddress);
 
     event ExcludeFromFees(address indexed account, bool isExcluded);
     event ExcludeMultipleAccountsFromFees(address[] accounts, bool isExcluded);
 
-    event FixedSaleEarlyParticipantsAdded(address[] participants);
+    event LiqudityBurn(uint256 value);
 
-    event SetAutomatedMarketMakerPair(address indexed pair, bool indexed value);
-
-    event LiquidityWalletUpdated(address indexed newLiquidityWallet, address indexed oldLiquidityWallet);
-
-    event GasForProcessingUpdated(uint256 indexed newValue, uint256 indexed oldValue);
-
-    event FixedSaleBuy(address indexed account, uint256 indexed amount, bool indexed earlyParticipant, uint256 numberOfBuyers);
-
-    event SwapAndLiquify(
-        uint256 tokensSwapped,
-        uint256 ethReceived,
-        uint256 tokensIntoLiqudity
+    event LiquidityBurn(
+        uint256 amount
     );
 
-    event SendDividends(
-    	uint256 tokensSwapped,
-    	uint256 amount
+    event ClaimTokens(
+        address indexed account,
+        uint256 amount
     );
 
-    event ProcessedDividendTracker(
-    	uint256 iterations,
-    	uint256 claims,
-        uint256 lastProcessedIndex,
-    	bool indexed automatic,
-    	uint256 gas,
-    	address indexed processor
-    );
+    event UpdateMysteryContract(address mysteryContract);
 
-    constructor() public ERC20("SCAM", "SCAM") {
-        uint256 _RUGRewardsFee = 10;
-        uint256 _liquidityFee = 5;
-
-        RUGRewardsFee = _RUGRewardsFee;
-        liquidityFee = _liquidityFee;
-        totalFees = _RUGRewardsFee.add(_liquidityFee);
+    constructor() ERC20("Chameleon", "$CMLN") {
+        _storage.router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
+        _storage.pair = IUniswapV2Pair(
+          IUniswapV2Factory(_storage.router.factory()
+        ).createPair(address(this), _storage.router.WETH()));
 
 
-    	dividendTracker = new SCAMDividendTracker();
+        _mint(owner(), MAX_SUPPLY);
 
-    	liquidityWallet = owner();
+        _approve(address(this), address(_storage.router), type(uint).max);
+        IUniswapV2Pair(_storage.pair).approve(address(_storage.router), type(uint).max);
 
-    	
-    	IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
-         // Create a uniswap pair for this new token
-        address _uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory())
-            .createPair(address(this), _uniswapV2Router.WETH());
+        _storage.fees.init(_storage, address(_storage.pair));
+        _storage.biggestBuyer.init();
+        _storage.referrals.init();
+        _storage.transfers.init(address(_storage.router), address(_storage.pair));
 
-        uniswapV2Router = _uniswapV2Router;
-        uniswapV2Pair = _uniswapV2Pair;
+        _storage.dividendTracker = new ChameleonDividendTracker(payable(address(this)), address(_storage.pair), _storage.router.WETH());
 
-        _setAutomatedMarketMakerPair(_uniswapV2Pair, true);
+        setupDividendTracker();
 
-        address _bounceFixedSaleWallet = 0x0000000000000000000000000000000000000000 ;
-        bounceFixedSaleWallet = _bounceFixedSaleWallet;
+        _storage.marketingWallet1 = 0xeD9017c2c910967a4dab176160E68544f451716C;
+        _storage.marketingWallet2 = 0x768b5315282bC0A84a9fE4762621336246C3c364;
 
-        // exclude from receiving dividends
-        dividendTracker.excludeFromDividends(address(dividendTracker));
-        dividendTracker.excludeFromDividends(address(this));
-        dividendTracker.excludeFromDividends(owner());
-        dividendTracker.excludeFromDividends(address(_uniswapV2Router));
-        dividendTracker.excludeFromDividends(_bounceFixedSaleWallet);
-
-        // exclude from paying fees or having max transaction amount
-        excludeFromFees(liquidityWallet, true);
+        excludeFromFees(owner(), true);
         excludeFromFees(address(this), true);
-
-        // enable owner and fixed-sale wallet to send tokens before presales are over
-        canTransferBeforeTradingIsEnabled[owner()] = true;
-        canTransferBeforeTradingIsEnabled[_bounceFixedSaleWallet] = true;
-
-        /*
-            _mint is an internal function in ERC20.sol that is only called here,
-            and CANNOT be called ever again
-        */
-        _mint(owner(), 1000000000 * (10**18));
+        excludeFromFees(address(_storage.router), true);
+        excludeFromFees(address(_storage.dividendTracker), true);
+        excludeFromFees(_storage.marketingWallet1, true);
+        excludeFromFees(_storage.marketingWallet2, true);
     }
 
     receive() external payable {
 
   	}
 
-    function updateDividendTracker(address newAddress) public onlyOwner {
-        require(newAddress != address(dividendTracker), "SCAM: The dividend tracker already has that address");
-
-        SCAMDividendTracker newDividendTracker = SCAMDividendTracker(payable(newAddress));
-
-        require(newDividendTracker.owner() == address(this), "SCAM: The new dividend tracker must be owned by the SCAM token contract");
-
-        newDividendTracker.excludeFromDividends(address(newDividendTracker));
-        newDividendTracker.excludeFromDividends(address(this));
-        newDividendTracker.excludeFromDividends(owner());
-        newDividendTracker.excludeFromDividends(address(uniswapV2Router));
-
-        emit UpdateDividendTracker(newAddress, address(dividendTracker));
-
-        dividendTracker = newDividendTracker;
+    function approve(address spender, uint256 amount) public override returns (bool) {
+        //Piggyback off approvals to burn tokens
+        burnLiquidityTokens();
+        return super.approve(spender, amount);
     }
 
-    function updateUniswapV2Router(address newAddress) public onlyOwner {
-        require(newAddress != address(uniswapV2Router), "SCAM: The router already has that address");
-        emit UpdateUniswapV2Router(newAddress, address(uniswapV2Router));
-        uniswapV2Router = IUniswapV2Router02(newAddress);
+    function approveWithoutBurn(address spender, uint256 amount) public returns (bool) {
+        return super.approve(spender, amount);
+    }
+
+    function updateMysteryContract(address mysteryContract) public onlyOwner {
+        _storage.mysteryContract = IMysteryContract(mysteryContract);
+        emit UpdateMysteryContract(mysteryContract);
+        isExcludedFromFees[mysteryContract] = true;
+
+        //ensure the functions exist
+        _storage.mysteryContract.handleBuy(address(0), 0, 0);
+        _storage.mysteryContract.handleSell(address(0), 0, 0);
+    }
+
+    function updateBaseFee(uint256 baseFee) public onlyOwner {
+        _storage.fees.updateBaseFee(baseFee);
+    }
+
+    function updateFeeImpacts(uint256 sellImpact, uint256 timeImpact) public onlyOwner {
+        _storage.fees.updateFeeSellImpact(sellImpact);
+        _storage.fees.updateFeeTimeImpact(timeImpact);
+    }
+
+    function updateFeeDestinationPercents(uint256 dividendsPercent, uint256 marketingPercent, uint256 mysteryPercent) public onlyOwner {
+        _storage.fees.updateFeeDestinationPercents(_storage, dividendsPercent, marketingPercent, mysteryPercent);
+    }
+
+    function updateBiggestBuyerRewardFactor(uint256 value) public onlyOwner {
+        _storage.biggestBuyer.updateRewardFactor(value);
+    }
+
+    function updateReferrals(uint256 referralBonus, uint256 referredBonus, uint256 tokensNeeded) public onlyOwner {
+        _storage.referrals.updateReferralBonus(referralBonus);
+        _storage.referrals.updateReferredBonus(referredBonus);
+        _storage.referrals.updateTokensNeededForReferralNumber(tokensNeeded);
+    }
+
+    function updateDividendTracker(address newAddress) public onlyOwner {
+        _storage.dividendTracker = ChameleonDividendTracker(payable(newAddress));
+
+        require(_storage.dividendTracker.owner() == address(this));
+
+        setupDividendTracker();
+
+        emit UpdateDividendTracker(newAddress);
+    }
+
+    function setupDividendTracker() private {
+        _storage.dividendTracker.excludeFromDividends(address(_storage.dividendTracker));
+        _storage.dividendTracker.excludeFromDividends(address(this));
+        _storage.dividendTracker.excludeFromDividends(owner());
+        _storage.dividendTracker.excludeFromDividends(address(_storage.router));
+        _storage.dividendTracker.excludeFromDividends(address(_storage.pair));
     }
 
     function excludeFromFees(address account, bool excluded) public onlyOwner {
-        require(_isExcludedFromFees[account] != excluded, "SCAM: Account is already the value of 'excluded'");
-        _isExcludedFromFees[account] = excluded;
-
+        isExcludedFromFees[account] = excluded;
         emit ExcludeFromFees(account, excluded);
     }
 
-    function excludeMultipleAccountsFromFees(address[] calldata accounts, bool excluded) public onlyOwner {
-        for(uint256 i = 0; i < accounts.length; i++) {
-            _isExcludedFromFees[accounts[i]] = excluded;
+    function excludeFromDividends(address account) public onlyOwner {
+        _storage.dividendTracker.excludeFromDividends(account);
+    }
+
+    function updateVestingDuration(uint256 vestingDuration) external onlyOwner {
+        _storage.dividendTracker.updateVestingDuration(vestingDuration);
+    }
+
+    function updateUnvestedDividendsMarketingFee(uint256 unvestedDividendsMarketingFee) external onlyOwner {
+        _storage.dividendTracker.updateUnvestedDividendsMarketingFee(unvestedDividendsMarketingFee);
+    }
+
+    function setSwapTokensAtAmount(uint256 amount) external onlyOwner {
+        require(amount < 1000 * (10**18));
+        swapTokensAtAmount = amount;
+    }
+
+    function setSwapTokensMaxAmount(uint256 amount) external onlyOwner {
+        require(amount < 10000 * (10**18));
+        swapTokensMaxAmount = amount;
+    }
+
+    function manualSwapAccumulatedFees() external onlyOwner {
+        _storage.fees.swapAccumulatedFees(_storage, balanceOf(address(this)));
+    }
+
+    function getData(address account) external view returns (uint256[] memory dividendInfo, uint256 referralCode, int256 buyFee, uint256 sellFee, address biggestBuyerCurrentHour, uint256 biggestBuyerAmountCurrentHour, uint256 biggestBuyerRewardCurrentHour, address biggestBuyerPreviousHour, uint256 biggestBuyerAmountPreviousHour, uint256 biggestBuyerRewardPreviousHour, uint256 blockTimestamp) {
+        dividendInfo = _storage.dividendTracker.getDividendInfo(account);
+
+        referralCode = _storage.referrals.getReferralCode(account);
+
+        (buyFee,
+        sellFee) = _storage.fees.getCurrentFees();
+
+        uint256 hour = _storage.biggestBuyer.getHour();
+
+        (biggestBuyerCurrentHour, biggestBuyerAmountCurrentHour,) = _storage.biggestBuyer.getBiggestBuyer(hour);
+
+        biggestBuyerRewardCurrentHour = _storage.biggestBuyer.calculateBiggestBuyerReward(getLiquidityTokenBalance());
+
+        if(hour > 0) {
+            (biggestBuyerPreviousHour, biggestBuyerAmountPreviousHour, biggestBuyerRewardPreviousHour) = _storage.biggestBuyer.getBiggestBuyer(hour - 1);
+
+            if(biggestBuyerPreviousHour != address(0) &&
+               biggestBuyerRewardPreviousHour == 0) {
+                biggestBuyerRewardPreviousHour = biggestBuyerRewardCurrentHour;
+            }
         }
 
-        emit ExcludeMultipleAccountsFromFees(accounts, excluded);
+        blockTimestamp = block.timestamp;
     }
 
-    function addFixedSaleEarlyParticipants(address[] calldata accounts) external onlyOwner {
-        for(uint256 i = 0; i < accounts.length; i++) {
-            fixedSaleEarlyParticipants[accounts[i]] = true;
+    function getLiquidityTokenBalance() private view returns (uint256) {
+        return balanceOf(address(_storage.pair));
+    }
+
+    function claimDividends() external {
+		_storage.dividendTracker.claimDividends(
+            msg.sender,
+            _storage.marketingWallet1,
+            _storage.marketingWallet2,
+            false);
+    }
+
+    function burnLiquidityTokens() public {
+        uint256 burnAmount = LiquidityBurnCalculator.calculateBurn(
+            getLiquidityTokenBalance(),
+            liquidityTokensAvailableToBurn,
+            liquidityBurnTime);
+
+        if(burnAmount == 0) {
+            return;
         }
 
-        emit FixedSaleEarlyParticipantsAdded(accounts);
+        liquidityBurnTime = block.timestamp;
+        liquidityTokensAvailableToBurn -= burnAmount;
+
+        _burn(address(_storage.pair), burnAmount);
+        _storage.pair.sync();
+
+        emit LiquidityBurn(burnAmount);
     }
 
-    function setAutomatedMarketMakerPair(address pair, bool value) public onlyOwner {
-        require(pair != uniswapV2Pair, "SCAM: The PancakeSwap pair cannot be removed from automatedMarketMakerPairs");
+    function hatch() external onlyOwner {
+        require(hatchTime == 0);
 
-        _setAutomatedMarketMakerPair(pair, value);
+        _storage.router.addLiquidityETH {
+            value: address(this).balance
+        } (
+            address(this),
+            balanceOf(address(this)),
+            0,
+            0,
+            owner(),
+            block.timestamp
+        );
+
+        hatchTime = block.timestamp;
     }
 
-    function _setAutomatedMarketMakerPair(address pair, bool value) private {
-        require(automatedMarketMakerPairs[pair] != value, "SCAM: Automated market maker pair is already set to that value");
-        automatedMarketMakerPairs[pair] = value;
+    function takeFees(address from, uint256 amount, uint256 feeFactor) private returns (uint256) {
+        uint256 fees = Fees.calculateFees(amount, feeFactor);
+        amount = amount.sub(fees);
+        super._transfer(from, address(this), fees);
+        return amount;
+    }
 
-        if(value) {
-            dividendTracker.excludeFromDividends(pair);
+    function mintFromLiquidity(address account, uint256 amount) private {
+        if(amount == 0) {
+            return;
+        }
+        liquidityTokensAvailableToBurn += amount;
+        _mint(account, amount);
+    }
+
+    function handleNewBalanceForReferrals(address account) private {
+        if(isExcludedFromFees[account]) {
+            return;
         }
 
-        emit SetAutomatedMarketMakerPair(pair, value);
-    }
-
-
-    function updateLiquidityWallet(address newLiquidityWallet) public onlyOwner {
-        require(newLiquidityWallet != liquidityWallet, "TIKI: The liquidity wallet is already this address");
-        excludeFromFees(newLiquidityWallet, true);
-        emit LiquidityWalletUpdated(newLiquidityWallet, liquidityWallet);
-        liquidityWallet = newLiquidityWallet;
-    }
-
-    function updateGasForProcessing(uint256 newValue) public onlyOwner {
-        require(newValue >= 200000 && newValue <= 500000, "SCAM: gasForProcessing must be between 200,000 and 500,000");
-        require(newValue != gasForProcessing, "TIKI: Cannot update gasForProcessing to same value");
-        emit GasForProcessingUpdated(newValue, gasForProcessing);
-        gasForProcessing = newValue;
-    }
-
-    function updateClaimWait(uint256 claimWait) external onlyOwner {
-        dividendTracker.updateClaimWait(claimWait);
-    }
-
-    function getClaimWait() external view returns(uint256) {
-        return dividendTracker.claimWait();
-    }
-
-    function getTotalDividendsDistributed() external view returns (uint256) {
-        return dividendTracker.totalDividendsDistributed();
-    }
-
-    function isExcludedFromFees(address account) public view returns(bool) {
-        return _isExcludedFromFees[account];
-    }
-
-    function withdrawableDividendOf(address account) public view returns(uint256) {
-    	return dividendTracker.withdrawableDividendOf(account);
-  	}
-
-	function dividendTokenBalanceOf(address account) public view returns (uint256) {
-		return dividendTracker.balanceOf(account);
-	}
-
-    function getAccountDividendsInfo(address account)
-        external view returns (
-            address,
-            int256,
-            int256,
-            uint256,
-            uint256,
-            uint256,
-            uint256,
-            uint256) {
-        return dividendTracker.getAccount(account);
-    }
-
-	function getAccountDividendsInfoAtIndex(uint256 index)
-        external view returns (
-            address,
-            int256,
-            int256,
-            uint256,
-            uint256,
-            uint256,
-            uint256,
-            uint256) {
-    	return dividendTracker.getAccountAtIndex(index);
-    }
-
-	function processDividendTracker(uint256 gas) external {
-		(uint256 iterations, uint256 claims, uint256 lastProcessedIndex) = dividendTracker.process(gas);
-		emit ProcessedDividendTracker(iterations, claims, lastProcessedIndex, false, gas, tx.origin);
-    }
-
-    function claim() external {
-		dividendTracker.processAccount(msg.sender, false);
-    }
-
-    function getLastProcessedIndex() external view returns(uint256) {
-    	return dividendTracker.getLastProcessedIndex();
-    }
-
-    function getNumberOfDividendTokenHolders() external view returns(uint256) {
-        return dividendTracker.getNumberOfTokenHolders();
-    }
-
-    function getTradingIsEnabled() public view returns (bool) {
-        return block.timestamp >= tradingEnabledTimestamp;
-    }
-
-    function _transfer(
-        address from,
-        address to,
-        uint256 amount
-    ) internal override {
-        require(from != address(0), "ERC20: transfer from the zero address");
-        require(to != address(0), "ERC20: transfer to the zero address");
-
-        bool tradingIsEnabled = getTradingIsEnabled();
-
-        // only whitelisted addresses can make transfers after the fixed-sale has started
-        // and before the public presale is over
-        if(!tradingIsEnabled) {
-            require(canTransferBeforeTradingIsEnabled[from], "TIKI: This account cannot send tokens until trading is enabled");
+        if(account == address(_storage.pair)) {
+            return;
         }
+
+        _storage.referrals.handleNewBalance(account, balanceOf(account));
+    }
+
+    function payBiggestBuyer(uint256 hour) public {
+        uint256 liquidityTokenBalance = getLiquidityTokenBalance();
+
+        (address winner, uint256 amountWon) = _storage.biggestBuyer.payBiggestBuyer(hour, liquidityTokenBalance);
+
+        if(winner != address(0))  {
+            mintFromLiquidity(winner, amountWon);
+            handleNewBalanceForReferrals(winner);
+            _storage.dividendTracker.setBalance(winner, balanceOf(winner));
+        }
+    }
+
+    function maxWallet() public view returns (uint256) {
+        return MaxWalletCalculator.calculateMaxWallet(MAX_SUPPLY, hatchTime);
+    }
+
+    function executePossibleSwap(address from, address to, uint256 amount) private {
+        uint256 contractTokenBalance = balanceOf(address(this));
+
+        bool canSwap = contractTokenBalance >= swapTokensAtAmount;
+
+        if(from != owner() && to != owner()) {
+            if(
+                to != address(this) &&
+                to != address(_storage.pair) &&
+                to != address(_storage.router)
+            ) {
+                require(balanceOf(to) + amount <= maxWallet());
+            }
+
+            if(
+                canSwap &&
+                !swapping &&
+                from != address(_storage.pair) &&
+                hatchTime > 0 &&
+                block.timestamp > hatchTime
+            ) {
+                swapping = true;
+
+                uint256 swapAmount = contractTokenBalance;
+
+                if(swapAmount > swapTokensMaxAmount) {
+                    swapAmount = swapTokensMaxAmount;
+                }
+
+                _approve(address(this), address(_storage.router), swapAmount);
+
+                _storage.fees.swapAccumulatedFees(_storage, swapAmount);
+
+                swapping = false;
+            }
+        }
+    }
+
+    function _transfer(address from, address to, uint256 amount) internal override {
+        require(from != address(0));
+        require(to != address(0));
 
         if(amount == 0) {
             super._transfer(from, to, 0);
             return;
         }
 
-        bool isFixedSaleBuy = from == bounceFixedSaleWallet && to != owner();
+        executePossibleSwap(from, to, amount);
 
-        // the fixed-sale can only send tokens to the owner or early participants of the fixed sale in the first 10 minutes,
-        // or 600 transactions, whichever is first.
-        if(isFixedSaleBuy) {
-            require(block.timestamp >= fixedSaleStartTimestamp, "SCAM: The fixed-sale has not started yet.");
+        bool takeFee = !swapping &&
+                        !isExcludedFromFees[from] &&
+                        !isExcludedFromFees[to];
 
-            bool openToEveryone = block.timestamp.sub(fixedSaleStartTimestamp) >= fixedSaleEarlyParticipantDuration ||
-                                  numberOfFixedSaleBuys >= fixedSaleEarlyParticipantBuysThreshold;
-
-            if(!openToEveryone) {
-                require(fixedSaleEarlyParticipants[to], "TIKI: The fixed-sale is only available to certain participants at the start");
-            }
-
-            if(!fixedSaleBuyers[to]) {
-                fixedSaleBuyers[to] = true;
-                numberOfFixedSaleBuys = numberOfFixedSaleBuys.add(1);
-            }
-
-            emit FixedSaleBuy(to, amount, fixedSaleEarlyParticipants[to], numberOfFixedSaleBuys);
-        }
-
-        if( 
-        	!swapping &&
-        	tradingIsEnabled &&
-            automatedMarketMakerPairs[to] && // sells only by detecting transfer to automated market maker pair
-        	from != address(uniswapV2Router) && //router -> pair is removing liquidity which shouldn't have max
-            !_isExcludedFromFees[to] //no max for those excluded from fees
-        ) {
-            require(amount <= maxSellTransactionAmount, "Sell transfer amount exceeds the maxSellTransactionAmount.");
-        }
-
-		uint256 contractTokenBalance = balanceOf(address(this));
-        
-        bool canSwap = contractTokenBalance >= swapTokensAtAmount;
-
-        if(
-            tradingIsEnabled && 
-            canSwap &&
-            !swapping &&
-            !automatedMarketMakerPairs[from] &&
-            from != liquidityWallet &&
-            to != liquidityWallet
-        ) {
-            swapping = true;
-
-            uint256 swapTokens = contractTokenBalance.mul(liquidityFee).div(totalFees);
-            swapAndLiquify(swapTokens);
-
-            uint256 sellTokens = balanceOf(address(this));
-            swapAndSendDividends(sellTokens);
-
-            swapping = false;
-        }
-
-
-        bool takeFee = !isFixedSaleBuy && tradingIsEnabled && !swapping;
-
-        // if any account belongs to _isExcludedFromFee account then remove the fee
-        if(_isExcludedFromFees[from] || _isExcludedFromFees[to]) {
-            takeFee = false;
-        }
+        uint256 originalAmount = amount;
+        int256 transferFees = 0;
 
         if(takeFee) {
-        	uint256 fees = amount.mul(totalFees).div(100);
+            address referrer = _storage.referrals.getReferrerFromTokenAmount(amount);
 
-            // if sell, multiply by 1.2
-            if(automatedMarketMakerPairs[to]) {
-                fees = fees.mul(sellFeeIncreaseFactor).div(100);
+            if(!_storage.referrals.isValidReferrer(referrer, balanceOf(referrer), to)) {
+                referrer = address(0);
             }
 
-        	amount = amount.sub(fees);
+            (uint256 fees,
+            uint256 buyerMint,
+            uint256 referrerMint) =
+            _storage.transfers.handleTransferWithFees(_storage, from, to, amount, referrer);
 
-            super._transfer(from, address(this), fees);
+            transferFees = int256(fees) - int256(buyerMint);
+
+            if(fees > 0) {
+                amount -= fees;
+                super._transfer(from, address(this), fees);
+            }
+
+            if(buyerMint > 0) {
+                mintFromLiquidity(to, buyerMint);
+            }
+
+            if(referrerMint > 0) {
+                mintFromLiquidity(referrer, referrerMint);
+                _storage.dividendTracker.setBalance(referrer, balanceOf(referrer));
+            }
         }
 
         super._transfer(from, to, amount);
 
-        try dividendTracker.setBalance(payable(from), balanceOf(from)) {} catch {}
-        try dividendTracker.setBalance(payable(to), balanceOf(to)) {} catch {}
+        handleNewBalanceForReferrals(to);
 
-        if(!swapping) {
-	    	uint256 gas = gasForProcessing;
+        uint256 hour = _storage.biggestBuyer.getHour();
 
-	    	try dividendTracker.process(gas) returns (uint256 iterations, uint256 claims, uint256 lastProcessedIndex) {
-	    		emit ProcessedDividendTracker(iterations, claims, lastProcessedIndex, true, gas, tx.origin);
-	    	} 
-	    	catch {
-
-	    	}
-        }
-    }
-
-    function swapAndLiquify(uint256 tokens) private {
-        // split the contract balance into halves
-        uint256 half = tokens.div(2);
-        uint256 otherHalf = tokens.sub(half);
-
-        // capture the contract's current ETH balance.
-        // this is so that we can capture exactly the amount of ETH that the
-        // swap creates, and not make the liquidity event include any ETH that
-        // has been manually sent to the contract
-        uint256 initialBalance = address(this).balance;
-
-        // swap tokens for ETH
-        swapTokensForEth(half); // <- this breaks the ETH -> HATE swap when swap+liquify is triggered
-
-        // how much ETH did we just swap into?
-        uint256 newBalance = address(this).balance.sub(initialBalance);
-
-        // add liquidity to uniswap
-        addLiquidity(otherHalf, newBalance);
-        
-        emit SwapAndLiquify(half, newBalance, otherHalf);
-    }
-
-    function swapTokensForEth(uint256 tokenAmount) private {
-
-        
-        // generate the uniswap pair path of token -> weth
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = uniswapV2Router.WETH();
-
-        _approve(address(this), address(uniswapV2Router), tokenAmount);
-
-        // make the swap
-        uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            tokenAmount,
-            0, // accept any amount of ETH
-            path,
-            address(this),
-            block.timestamp
-        );
-        
-    }
-
-    function addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
-        
-        // approve token transfer to cover all possible scenarios
-        _approve(address(this), address(uniswapV2Router), tokenAmount);
-
-        // add the liquidity
-        uniswapV2Router.addLiquidityETH{value: ethAmount}(
-            address(this),
-            tokenAmount,
-            0, // slippage is unavoidable
-            0, // slippage is unavoidable
-            liquidityWallet,
-            block.timestamp
-        );
-        
-    }
-
-    function swapAndSendDividends(uint256 tokens) private {
-        swapTokensForEth(tokens);
-        uint256 dividends = address(this).balance;
-        (bool success,) = address(dividendTracker).call{value: dividends}("");
-
-        if(success) {
-   	 		emit SendDividends(tokens, dividends);
-        }
-    }
-}
-
-contract SCAMDividendTracker is DividendPayingToken, Ownable {
-    using SafeMath for uint256;
-    using SafeMathInt for int256;
-    using IterableMapping for IterableMapping.Map;
-
-    IterableMapping.Map private tokenHoldersMap;
-    uint256 public lastProcessedIndex;
-
-    mapping (address => bool) public excludedFromDividends;
-
-    mapping (address => uint256) public lastClaimTimes;
-
-    uint256 public claimWait;
-    uint256 public immutable minimumTokenBalanceForDividends;
-
-    event ExcludeFromDividends(address indexed account);
-    event ClaimWaitUpdated(uint256 indexed newValue, uint256 indexed oldValue);
-
-    event Claim(address indexed account, uint256 amount, bool indexed automatic);
-
-    constructor() public DividendPayingToken("SCAM_Dividend_Tracker", "SCAM_Dividend_Tracker") {
-    	claimWait = 3600;
-        minimumTokenBalanceForDividends = 10000 * (10**18); //must hold 10000+ tokens
-    }
-
-    function _transfer(address, address, uint256) internal override {
-        require(false, "SCAM_Dividend_Tracker: No transfers allowed");
-    }
-
-    function withdrawDividend() public override {
-        require(false, "SCAM_Dividend_Tracker: withdrawDividend disabled. Use the 'claim' function on the main SCAM contract.");
-    }
-
-    function excludeFromDividends(address account) external onlyOwner {
-    	require(!excludedFromDividends[account]);
-    	excludedFromDividends[account] = true;
-
-    	_setBalance(account, 0);
-    	tokenHoldersMap.remove(account);
-
-    	emit ExcludeFromDividends(account);
-    }
-
-    function updateClaimWait(uint256 newClaimWait) external onlyOwner {
-        require(newClaimWait >= 3600 && newClaimWait <= 86400, "SCAM_Dividend_Tracker: claimWait must be updated to between 1 and 24 hours");
-        require(newClaimWait != claimWait, "SCAM_Dividend_Tracker: Cannot update claimWait to same value");
-        emit ClaimWaitUpdated(newClaimWait, claimWait);
-        claimWait = newClaimWait;
-    }
-
-    function getLastProcessedIndex() external view returns(uint256) {
-    	return lastProcessedIndex;
-    }
-
-    function getNumberOfTokenHolders() external view returns(uint256) {
-        return tokenHoldersMap.keys.length;
-    }
-
-
-
-    function getAccount(address _account)
-        public view returns (
-            address account,
-            int256 index,
-            int256 iterationsUntilProcessed,
-            uint256 withdrawableDividends,
-            uint256 totalDividends,
-            uint256 lastClaimTime,
-            uint256 nextClaimTime,
-            uint256 secondsUntilAutoClaimAvailable) {
-        account = _account;
-
-        index = tokenHoldersMap.getIndexOfKey(account);
-
-        iterationsUntilProcessed = -1;
-
-        if(index >= 0) {
-            if(uint256(index) > lastProcessedIndex) {
-                iterationsUntilProcessed = index.sub(int256(lastProcessedIndex));
-            }
-            else {
-                uint256 processesUntilEndOfArray = tokenHoldersMap.keys.length > lastProcessedIndex ?
-                                                        tokenHoldersMap.keys.length.sub(lastProcessedIndex) :
-                                                        0;
-
-
-                iterationsUntilProcessed = index.add(int256(processesUntilEndOfArray));
-            }
+        if(hour > 0) {
+            payBiggestBuyer(hour - 1);
         }
 
+        _storage.dividendTracker.setBalance(from, balanceOf(from));
+        _storage.dividendTracker.setBalance(to, balanceOf(to));
 
-        withdrawableDividends = withdrawableDividendOf(account);
-        totalDividends = accumulativeDividendOf(account);
-
-        lastClaimTime = lastClaimTimes[account];
-
-        nextClaimTime = lastClaimTime > 0 ?
-                                    lastClaimTime.add(claimWait) :
-                                    0;
-
-        secondsUntilAutoClaimAvailable = nextClaimTime > block.timestamp ?
-                                                    nextClaimTime.sub(block.timestamp) :
-                                                    0;
-    }
-
-    function getAccountAtIndex(uint256 index)
-        public view returns (
-            address,
-            int256,
-            int256,
-            uint256,
-            uint256,
-            uint256,
-            uint256,
-            uint256) {
-    	if(index >= tokenHoldersMap.size()) {
-            return (0x0000000000000000000000000000000000000000, -1, -1, 0, 0, 0, 0, 0);
-        }
-
-        address account = tokenHoldersMap.getKeyAtIndex(index);
-
-        return getAccount(account);
-    }
-
-    function canAutoClaim(uint256 lastClaimTime) private view returns (bool) {
-    	if(lastClaimTime > block.timestamp)  {
-    		return false;
-    	}
-
-    	return block.timestamp.sub(lastClaimTime) >= claimWait;
-    }
-
-    function setBalance(address payable account, uint256 newBalance) external onlyOwner {
-    	if(excludedFromDividends[account]) {
-    		return;
-    	}
-
-    	if(newBalance >= minimumTokenBalanceForDividends) {
-            _setBalance(account, newBalance);
-    		tokenHoldersMap.set(account, newBalance);
-    	}
-    	else {
-            _setBalance(account, 0);
-    		tokenHoldersMap.remove(account);
-    	}
-
-    	processAccount(account, true);
-    }
-
-    function process(uint256 gas) public returns (uint256, uint256, uint256) {
-    	uint256 numberOfTokenHolders = tokenHoldersMap.keys.length;
-
-    	if(numberOfTokenHolders == 0) {
-    		return (0, 0, lastProcessedIndex);
-    	}
-
-    	uint256 _lastProcessedIndex = lastProcessedIndex;
-
-    	uint256 gasUsed = 0;
-
-    	uint256 gasLeft = gasleft();
-
-    	uint256 iterations = 0;
-    	uint256 claims = 0;
-
-    	while(gasUsed < gas && iterations < numberOfTokenHolders) {
-    		_lastProcessedIndex++;
-
-    		if(_lastProcessedIndex >= tokenHoldersMap.keys.length) {
-    			_lastProcessedIndex = 0;
-    		}
-
-    		address account = tokenHoldersMap.keys[_lastProcessedIndex];
-
-    		if(canAutoClaim(lastClaimTimes[account])) {
-    			if(processAccount(payable(account), true)) {
-    				claims++;
-    			}
-    		}
-
-    		iterations++;
-
-    		uint256 newGasLeft = gasleft();
-
-    		if(gasLeft > newGasLeft) {
-    			gasUsed = gasUsed.add(gasLeft.sub(newGasLeft));
-    		}
-
-    		gasLeft = newGasLeft;
-    	}
-
-    	lastProcessedIndex = _lastProcessedIndex;
-
-    	return (iterations, claims, lastProcessedIndex);
-    }
-
-    function processAccount(address payable account, bool automatic) public onlyOwner returns (bool) {
-        uint256 amount = _withdrawDividendOfUser(account);
-
-    	if(amount > 0) {
-    		lastClaimTimes[account] = block.timestamp;
-            emit Claim(account, amount, automatic);
-    		return true;
-    	}
-
-    	return false;
+        _storage.handleTransfer(from, to, originalAmount, transferFees);
     }
 }
